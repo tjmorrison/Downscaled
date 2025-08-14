@@ -1,0 +1,109 @@
+# docker-compose.yml - Development Environment
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: snowpack_portal
+      POSTGRES_USER: snowpack_user
+      POSTGRES_PASSWORD: snowpack_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U snowpack_user -d snowpack_portal"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for Celery message broker
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+
+  # FastAPI Backend
+  backend:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://snowpack_user:snowpack_dev_password@db:5432/snowpack_portal
+      - REDIS_URL=redis://redis:6379
+      - ENVIRONMENT=development
+    volumes:
+      - ./backend:/app
+      - ./data:/app/data  # Mount for your existing data files
+      - ./config:/app/config  # Mount for your config files
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Celery Worker (for your background tasks)
+  celery-worker:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      - DATABASE_URL=postgresql://snowpack_user:snowpack_dev_password@db:5432/snowpack_portal
+      - REDIS_URL=redis://redis:6379
+      - ENVIRONMENT=development
+    volumes:
+      - ./backend:/app
+      - ./data:/app/data
+      - ./config:/app/config
+    depends_on:
+      - db
+      - redis
+    command: celery -A app.tasks.celery_app worker --loglevel=info
+
+  # Celery Beat (for scheduled tasks - 4AM/4PM runs)
+  celery-beat:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      - DATABASE_URL=postgresql://snowpack_user:snowpack_dev_password@db:5432/snowpack_portal
+      - REDIS_URL=redis://redis:6379
+      - ENVIRONMENT=development
+    volumes:
+      - ./backend:/app
+      - ./data:/app/data
+      - ./config:/app/config
+    depends_on:
+      - db
+      - redis
+    command: celery -A app.tasks.celery_app beat --loglevel=info
+
+  # React Frontend (we'll add this later)
+  frontend:
+    build: 
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+    profiles:
+      - frontend  # Only start with: docker-compose --profile frontend up
+
+volumes:
+  postgres_data:
+  redis_data:
